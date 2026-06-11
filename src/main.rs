@@ -1,5 +1,6 @@
 use futures_util::StreamExt;
 use serde::Deserialize;
+use tokio::signal;
 use tokio_tungstenite::{
     connect_async, tungstenite::Message, tungstenite::client::IntoClientRequest,
 };
@@ -67,12 +68,19 @@ async fn main() {
     let (mut ws_stream, _) = connect_async(request).await.unwrap();
     let mut order_book = OrderBook::new();
 
-    while let Some(msg) = ws_stream.next().await {
-        if let Ok(Message::Text(text)) = msg {
-            let quote: Quote = serde_json::from_str(&text).unwrap();
+    loop {
+        tokio::select! {
+            _ = signal::ctrl_c() => {
+                println!("-\nshutting down");
+                break; },
+            msg = ws_stream.next() => {
+                if let Some(Ok(Message::Text(text))) = msg {
+                    let quote: Quote = serde_json::from_str(&text).unwrap();
 
-            order_book.update(quote);
-            order_book.display()
+                    order_book.update(quote);
+                    order_book.display();
+                }
+            }
         }
     }
 }
