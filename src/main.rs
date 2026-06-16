@@ -48,15 +48,15 @@ impl OrderBook {
 
     pub fn display(&self) {
         println!("-");
-        for (price, qty) in self.bids.iter() {
-            println!("bid: {}, qty: {}", price, qty);
+        for (price, qty) in self.asks.iter().rev() {
+            println!("ask: {:.2}, qty: {:.4}", price, qty);
         }
         println!(
-            "-\nspread: {}\norder book imbalance: {}\n-",
+            "-\nspread: {:.2}\norder book imbalance: {:.4}\n-",
             self.spread, self.order_book_imbalance
         );
-        for (price, qty) in self.asks.iter().rev() {
-            println!("ask: {}, qty: {}", price, qty);
+        for (price, qty) in self.bids.iter() {
+            println!("bid: {:.2}, qty: {:.4}", price, qty);
         }
     }
 }
