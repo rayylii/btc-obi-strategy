@@ -12,11 +12,48 @@ struct Quotes {
 }
 
 #[derive(Debug)]
+enum Signal {
+    StrongBuy,
+    Buy,
+    Neutral,
+    Sell,
+    StrongSell,
+}
+
+impl Signal {
+    pub fn from_obi(obi: f64, prev_obi: f64) -> Self {
+        let shift = obi - prev_obi;
+        if obi > 0.7 && shift > 0.05 {
+            Signal::StrongBuy
+        } else if obi > 0.6 {
+            Signal::Buy
+        } else if obi < 0.3 && shift < -0.05 {
+            Signal::StrongSell
+        } else if obi < 0.4 {
+            Signal::Sell
+        } else {
+            Signal::Neutral
+        }
+    }
+
+    pub fn display(&self) -> &str {
+        match self {
+            Signal::StrongBuy => "strong buy",
+            Signal::Buy => "buy",
+            Signal::Neutral => "neutral",
+            Signal::Sell => "sell",
+            Signal::StrongSell => "strong sell",
+        }
+    }
+}
+
+#[derive(Debug)]
 struct OrderBook {
     bids: Vec<(f64, f64)>,
     asks: Vec<(f64, f64)>,
     spread: f64,
     order_book_imbalance: f64,
+    prev_obi: f64,
 }
 
 impl OrderBook {
@@ -26,10 +63,12 @@ impl OrderBook {
             asks: Vec::new(),
             spread: 0.0,
             order_book_imbalance: 0.0,
+            prev_obi: 0.0,
         }
     }
 
     pub fn update(&mut self, quotes: Quotes) {
+        self.prev_obi = self.order_book_imbalance;
         self.bids = quotes
             .bids
             .into_iter()
@@ -46,14 +85,20 @@ impl OrderBook {
         self.order_book_imbalance = bid_volume / (bid_volume + ask_volume);
     }
 
+    pub fn signal(&self) -> Signal {
+        Signal::from_obi(self.order_book_imbalance, self.prev_obi)
+    }
+
     pub fn display(&self) {
         println!("-");
         for (price, qty) in self.asks.iter().rev() {
             println!("ask: {:.2}, qty: {:.4}", price, qty);
         }
         println!(
-            "-\nspread: {:.2}\norder book imbalance: {:.4}\n-",
-            self.spread, self.order_book_imbalance
+            "-\nspread: {:.2}\norder book imbalance: {:.4}\nsignal: {}\n-",
+            self.spread,
+            self.order_book_imbalance,
+            self.signal().display()
         );
         for (price, qty) in self.bids.iter() {
             println!("bid: {:.2}, qty: {:.4}", price, qty);
