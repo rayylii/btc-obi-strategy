@@ -73,9 +73,9 @@ impl fmt::Display for Signal {
 struct OrderBook {
     bids: Vec<(f64, f64)>,
     asks: Vec<(f64, f64)>,
-    spread: f64,
-    obi: f64,
-    prev_obi: f64,
+    spread: Option<f64>,
+    obi: Option<f64>, // order book imbalance
+    prev_obi: Option<f64>,
 }
 
 impl OrderBook {
@@ -87,14 +87,27 @@ impl OrderBook {
         self.prev_obi = self.obi;
         self.bids = quotes.bids;
         self.asks = quotes.asks;
-        self.spread = self.asks.first().unwrap().0 - self.bids.first().unwrap().0;
+
+        self.spread = match (self.asks.first(), self.bids.first()) {
+            (Some(ask), Some(bid)) => Some(ask.0 - bid.0),
+            _ => None,
+        };
         let bid_volume = self.bids.iter().map(|(_, qty)| qty).sum::<f64>();
         let ask_volume = self.asks.iter().map(|(_, qty)| qty).sum::<f64>();
-        self.obi = bid_volume / (bid_volume + ask_volume);
+        let total_volume = bid_volume + ask_volume;
+
+        self.obi = if total_volume > 0.0 {
+            Some(bid_volume / total_volume)
+        } else {
+            None
+        };
     }
 
-    fn signal(&self) -> Signal {
-        Signal::from_obi(self.obi, self.prev_obi)
+    fn signal(&self) -> Option<Signal> {
+        match (self.obi, self.prev_obi) {
+            (Some(obi), Some(prev_obi)) => Some(Signal::from_obi(obi, prev_obi)),
+            _ => None,
+        }
     }
 }
 
@@ -104,12 +117,24 @@ impl fmt::Display for OrderBook {
         for (price, qty) in self.asks.iter().rev() {
             writeln!(f, "ask: {:.2}, qty: {:.4}", price, qty)?;
         }
+        let spread_str = match self.spread {
+            Some(s) => format!("{:.2}", s),
+            None => "unavailable".to_string(),
+        };
+
+        let obi_str = match self.obi {
+            Some(o) => format!("{:.4}", o),
+            None => "unavailable".to_string(),
+        };
+
+        let signal_str = match self.signal() {
+            Some(s) => s.to_string(),
+            None => "unavailable".to_string(),
+        };
         writeln!(
             f,
-            "-\nspread: {:.2}\norder book imbalance: {:.4}\nsignal: {}\n-",
-            self.spread,
-            self.obi,
-            self.signal()
+            "-\nspread: {}\norder book imbalance: {}\nsignal: {}\n-",
+            spread_str, obi_str, signal_str,
         )?;
         for (price, qty) in self.bids.iter() {
             writeln!(f, "bid: {:.2}, qty: {:.4}", price, qty)?;
@@ -122,9 +147,9 @@ impl fmt::Display for OrderBook {
 async fn main() {
     let request = "wss://stream.binance.com:9443/ws/btcusdt@depth10"
         .into_client_request()
-        .unwrap();
+        .expect("failed to parse");
 
-    let (mut ws_stream, _) = connect_async(request).await.unwrap();
+    let (mut ws_stream, _) = connect_async(request).await.expect("failed to connect");
     let mut order_book = OrderBook::new();
 
     loop {
@@ -134,12 +159,22 @@ async fn main() {
                 break;
             }
             msg = ws_stream.next() => {
-                if let Some(Ok(Message::Text(text))) = msg {
-                    let quotes: Quotes = serde_json::from_str(&text).unwrap();
-
-                    order_book.update(quotes);
-                    println!("{}", order_book)
-
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        if let Ok(quotes) = serde_json::from_str::<Quotes>(&text) {
+                            order_book.update(quotes);
+                            print!("{}", order_book)
+                        }
+                    }
+                    Some(Err(e)) => {
+                        println!("-\nerror: {}", e);
+                        break;
+                    }
+                    None => {
+                        println!("-\nconnection closed");
+                        break;
+                    }
+                    _ => {}
                 }
             }
         }
