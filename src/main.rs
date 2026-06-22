@@ -1,5 +1,6 @@
 use futures_util::StreamExt;
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
+use std::fmt;
 use tokio::signal;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -7,8 +8,26 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 #[derive(Debug, Deserialize)]
 struct Quotes {
-    bids: Vec<(String, String)>,
-    asks: Vec<(String, String)>,
+    #[serde(deserialize_with = "deserialize_price_qty")]
+    bids: Vec<(f64, f64)>,
+
+    #[serde(deserialize_with = "deserialize_price_qty")]
+    asks: Vec<(f64, f64)>,
+}
+
+fn deserialize_price_qty<'de, D>(deserializer: D) -> Result<Vec<(f64, f64)>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let raw: Vec<(&str, &str)> = Deserialize::deserialize(deserializer)?;
+    raw.into_iter()
+        .map(|(p, q)| {
+            Ok((
+                p.parse().map_err(serde::de::Error::custom)?,
+                q.parse().map_err(serde::de::Error::custom)?,
+            ))
+        })
+        .collect()
 }
 
 #[derive(Debug)]
@@ -21,7 +40,7 @@ enum Signal {
 }
 
 impl Signal {
-    pub fn from_obi(obi: f64, prev_obi: f64) -> Self {
+    fn from_obi(obi: f64, prev_obi: f64) -> Self {
         let shift = obi - prev_obi;
         if obi > 0.7 && shift > 0.05 {
             Signal::StrongBuy
@@ -35,74 +54,67 @@ impl Signal {
             Signal::Neutral
         }
     }
+}
 
-    pub fn display(&self) -> &str {
-        match self {
+impl fmt::Display for Signal {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let s = match self {
             Signal::StrongBuy => "strong buy",
             Signal::Buy => "buy",
             Signal::Neutral => "neutral",
             Signal::Sell => "sell",
             Signal::StrongSell => "strong sell",
-        }
+        };
+        write!(f, "{}", s)
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct OrderBook {
     bids: Vec<(f64, f64)>,
     asks: Vec<(f64, f64)>,
     spread: f64,
-    order_book_imbalance: f64,
+    obi: f64,
     prev_obi: f64,
 }
 
 impl OrderBook {
-    pub fn new() -> Self {
-        OrderBook {
-            bids: Vec::new(),
-            asks: Vec::new(),
-            spread: 0.0,
-            order_book_imbalance: 0.0,
-            prev_obi: 0.0,
-        }
+    fn new() -> Self {
+        Self::default()
     }
 
-    pub fn update(&mut self, quotes: Quotes) {
-        self.prev_obi = self.order_book_imbalance;
-        self.bids = quotes
-            .bids
-            .into_iter()
-            .map(|(price, qty)| (price.parse::<f64>().unwrap(), qty.parse::<f64>().unwrap()))
-            .collect::<Vec<(f64, f64)>>();
-        self.asks = quotes
-            .asks
-            .into_iter()
-            .map(|(price, qty)| (price.parse::<f64>().unwrap(), qty.parse::<f64>().unwrap()))
-            .collect::<Vec<(f64, f64)>>();
+    fn update(&mut self, quotes: Quotes) {
+        self.prev_obi = self.obi;
+        self.bids = quotes.bids;
+        self.asks = quotes.asks;
         self.spread = self.asks.first().unwrap().0 - self.bids.first().unwrap().0;
-        let bid_volume = self.bids.iter().map(|(_price, qty)| qty).sum::<f64>();
-        let ask_volume = self.asks.iter().map(|(_price, qty)| qty).sum::<f64>();
-        self.order_book_imbalance = bid_volume / (bid_volume + ask_volume);
+        let bid_volume = self.bids.iter().map(|(_, qty)| qty).sum::<f64>();
+        let ask_volume = self.asks.iter().map(|(_, qty)| qty).sum::<f64>();
+        self.obi = bid_volume / (bid_volume + ask_volume);
     }
 
-    pub fn signal(&self) -> Signal {
-        Signal::from_obi(self.order_book_imbalance, self.prev_obi)
+    fn signal(&self) -> Signal {
+        Signal::from_obi(self.obi, self.prev_obi)
     }
+}
 
-    pub fn display(&self) {
-        println!("-");
+impl fmt::Display for OrderBook {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        writeln!(f, "-")?;
         for (price, qty) in self.asks.iter().rev() {
-            println!("ask: {:.2}, qty: {:.4}", price, qty);
+            writeln!(f, "ask: {:.2}, qty: {:.4}", price, qty)?;
         }
-        println!(
+        writeln!(
+            f,
             "-\nspread: {:.2}\norder book imbalance: {:.4}\nsignal: {}\n-",
             self.spread,
-            self.order_book_imbalance,
-            self.signal().display()
-        );
+            self.obi,
+            self.signal()
+        )?;
         for (price, qty) in self.bids.iter() {
-            println!("bid: {:.2}, qty: {:.4}", price, qty);
+            writeln!(f, "bid: {:.2}, qty: {:.4}", price, qty)?;
         }
+        Ok(())
     }
 }
 
@@ -126,7 +138,7 @@ async fn main() {
                     let quotes: Quotes = serde_json::from_str(&text).unwrap();
 
                     order_book.update(quotes);
-                    order_book.display();
+                    println!("{}", order_book)
 
                 }
             }
