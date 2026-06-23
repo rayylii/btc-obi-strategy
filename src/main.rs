@@ -2,6 +2,7 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Deserializer};
 use std::fmt;
 use tokio::signal;
+use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -150,6 +151,26 @@ async fn main() {
         .expect("failed to parse");
 
     let (mut ws_stream, _) = connect_async(request).await.expect("failed to connect");
+
+    let (tx, mut rx) = mpsc::channel::<String>(32);
+
+    tokio::spawn(async move {
+        while let Some(msg) = ws_stream.next().await {
+            match msg {
+                Ok(Message::Text(text)) => {
+                    if tx.send(text.to_string()).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    println!("-\nerror: {}", e);
+                    break;
+                }
+            }
+        }
+    });
+
     let mut order_book = OrderBook::new();
 
     loop {
@@ -158,23 +179,18 @@ async fn main() {
                 println!("-\nshutting down");
                 break;
             }
-            msg = ws_stream.next() => {
+            msg = rx.recv() => {
                 match msg {
-                    Some(Ok(Message::Text(text))) => {
+                    Some(text) => {
                         if let Ok(quotes) = serde_json::from_str::<Quotes>(&text) {
                             order_book.update(quotes);
                             print!("{}", order_book)
                         }
                     }
-                    Some(Err(e)) => {
-                        println!("-\nerror: {}", e);
-                        break;
-                    }
                     None => {
-                        println!("-\nconnection closed");
+                        println!("-\nstream closed");
                         break;
                     }
-                    _ => {}
                 }
             }
         }
