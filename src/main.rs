@@ -1,7 +1,9 @@
 use futures_util::StreamExt;
 use serde::{Deserialize, Deserializer};
 use std::fmt;
+use std::sync::Arc;
 use tokio::signal;
+use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
@@ -70,6 +72,30 @@ impl fmt::Display for Signal {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum PositionSide {
+    Long,
+    Short,
+}
+
+#[derive(Clone, Copy)]
+struct Position {
+    side: PositionSide,
+    entry_price: f64,
+}
+
+#[derive(Default)]
+struct PnlTracker {
+    total_pnl_usd: f64,
+    trade_count: u32,
+    position: Option<Position>,
+}
+
+struct TradeIntent {
+    signal: Signal,
+    price: f64,
+}
+
 #[derive(Debug, Default)]
 struct OrderBook {
     bids: Vec<(f64, f64)>,
@@ -110,6 +136,14 @@ impl OrderBook {
             _ => None,
         }
     }
+
+    fn best_bid(&self) -> Option<f64> {
+        self.bids.first().map(|(p, _)| *p)
+    }
+
+    fn best_ask(&self) -> Option<f64> {
+        self.asks.first().map(|(p, _)| *p)
+    }
 }
 
 impl fmt::Display for OrderBook {
@@ -144,6 +178,60 @@ impl fmt::Display for OrderBook {
     }
 }
 
+async fn executor(mut rx: mpsc::Receiver<TradeIntent>, state: Arc<Mutex<PnlTracker>>) {
+    while let Some(intent) = rx.recv().await {
+        let mut tracker = state.lock().await;
+
+        let current_position = tracker.position;
+        match (current_position, &intent.signal) {
+            (None, Signal::StrongBuy) => {
+                println!(
+                    "side: long, price: ${:.2}, size: {} BTC",
+                    intent.price, TRADE_SIZE_BTC
+                );
+                tracker.position = Some(Position {
+                    side: PositionSide::Long,
+                    entry_price: intent.price,
+                })
+            }
+            (None, Signal::StrongSell) => {
+                println!(
+                    "side: short, price: ${:.2}, size: {} BTC",
+                    intent.price, TRADE_SIZE_BTC
+                );
+                tracker.position = Some(Position {
+                    side: PositionSide::Short,
+                    entry_price: intent.price,
+                })
+            }
+            (Some(pos), Signal::StrongSell) if pos.side == PositionSide::Long => {
+                let pnl = (intent.price - pos.entry_price) * TRADE_SIZE_BTC;
+                tracker.total_pnl_usd += pnl;
+                tracker.trade_count += 1;
+                tracker.position = None;
+                println!(
+                    "closed long, entry: {:.2}, exit: {:.2}, pnl: {:.2}, total pnl: {:.2}, trades = {}",
+                    pos.entry_price, intent.price, pnl, tracker.total_pnl_usd, tracker.trade_count
+                )
+            }
+            (Some(pos), Signal::StrongBuy) if pos.side == PositionSide::Short => {
+                let pnl = (pos.entry_price - intent.price) * TRADE_SIZE_BTC;
+                tracker.total_pnl_usd += pnl;
+                tracker.trade_count += 1;
+                tracker.position = None;
+                println!(
+                    "closed short, entry: {:.2}, exit = {:.2}, pnl: {:.2}, total pnl: {:.2}, trades = {}",
+                    pos.entry_price, intent.price, pnl, tracker.total_pnl_usd, tracker.trade_count
+                )
+            }
+            _ => {}
+        }
+    }
+}
+
+const TRADE_SIZE_BTC: f64 = 0.001;
+const STARTING_CAPITAL_USD: f64 = 100.0;
+
 #[tokio::main]
 async fn main() {
     let request = "wss://stream.binance.com:9443/ws/btcusdt@depth10"
@@ -153,6 +241,11 @@ async fn main() {
     let (mut ws_stream, _) = connect_async(request).await.expect("failed to connect");
 
     let (tx, mut rx) = mpsc::channel::<String>(32);
+    let pnl_tracker = Arc::new(Mutex::new(PnlTracker::default()));
+    let pnl_tracker_clone = Arc::clone(&pnl_tracker);
+    let (trade_tx, trade_rx) = mpsc::channel::<TradeIntent>(32);
+
+    tokio::spawn(executor(trade_rx, pnl_tracker_clone));
 
     tokio::spawn(async move {
         while let Some(msg) = ws_stream.next().await {
@@ -176,7 +269,9 @@ async fn main() {
     loop {
         tokio::select! {
             _ = signal::ctrl_c() => {
-                println!("-\nshutting down");
+                let tracker = pnl_tracker.lock().await;
+                let pct_return = (tracker.total_pnl_usd / STARTING_CAPITAL_USD) * 100.0;
+                println!("-\nshutting down, trades: {}, pnl: ${:.2}, return: {:.2}%", tracker.trade_count, tracker.total_pnl_usd, pct_return);
                 break;
             }
             msg = rx.recv() => {
@@ -184,7 +279,26 @@ async fn main() {
                     Some(text) => {
                         if let Ok(quotes) = serde_json::from_str::<Quotes>(&text) {
                             order_book.update(quotes);
-                            print!("{}", order_book)
+                            print!("{}", order_book);
+                            match order_book.signal() {
+                                Some(Signal::StrongBuy) => {
+                                    if let Some(price) = order_book.best_ask() {
+                                        let _ = trade_tx.send(TradeIntent {
+                                            signal: Signal::StrongBuy,
+                                            price,
+                                        }).await;
+                                    }
+                                }
+                                Some(Signal::StrongSell) =>  {
+                                    if let Some(price) = order_book.best_bid() {
+                                        let _ = trade_tx.send(TradeIntent {
+                                            signal: Signal::StrongSell,
+                                            price,
+                                        }).await;
+                                    }
+                                }
+                                _ => {}
+                            }
                         }
                     }
                     None => {
