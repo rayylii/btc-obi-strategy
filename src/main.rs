@@ -315,6 +315,8 @@ async fn main() {
     });
 
     let mut order_book = OrderBook::new();
+    let session_end = tokio::time::sleep(Duration::from_secs(SESSION_DURATION_SECS));
+    tokio::pin!(session_end);
 
     loop {
         tokio::select! {
@@ -324,7 +326,7 @@ async fn main() {
                 println!("-\nshutting down, trades: {}, pnl: ${:.4}, return: {:.4}%", tracker.trade_count, tracker.total_pnl_usd, pct_return);
                 break;
             }
-            _ = tokio::time::sleep(Duration::from_secs(SESSION_DURATION_SECS)) => {
+            _ = &mut session_end => {
                 let tracker = pnl_tracker.lock().await;
                 let pct_return = (tracker.total_pnl_usd / STARTING_CAPITAL_USD) * 100.0;
                 println!("-\nauto shutdown, trades : {}, pnl: ${:.4}, return: {:.4}%", tracker.trade_count, tracker.total_pnl_usd, pct_return);
