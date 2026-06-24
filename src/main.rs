@@ -1,10 +1,14 @@
+use chrono::Local;
 use futures_util::StreamExt;
 use serde::{Deserialize, Deserializer};
 use std::fmt;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::sync::Arc;
 use tokio::signal;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc;
+use tokio::time::Duration;
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
@@ -178,6 +182,35 @@ impl fmt::Display for OrderBook {
     }
 }
 
+fn log_trade(
+    side: &str,
+    entry_price: f64,
+    exit_price: f64,
+    pnl: f64,
+    total_pnl: f64,
+    trade_count: u32,
+) {
+    let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S%.3f").to_string();
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("trades.csv")
+        .unwrap();
+    if file.metadata().unwrap().len() == 0 {
+        writeln!(
+            file,
+            "timestamp,side,entry_price,exit_price,pnl,total_pnl,trade_count"
+        )
+        .unwrap();
+    }
+    writeln!(
+        file,
+        "{},{},{:.2},{:.2},{:.4},{:.4},{}",
+        timestamp, side, entry_price, exit_price, pnl, total_pnl, trade_count
+    )
+    .unwrap()
+}
+
 async fn executor(mut rx: mpsc::Receiver<TradeIntent>, state: Arc<Mutex<PnlTracker>>) {
     while let Some(intent) = rx.recv().await {
         let mut tracker = state.lock().await;
@@ -212,6 +245,14 @@ async fn executor(mut rx: mpsc::Receiver<TradeIntent>, state: Arc<Mutex<PnlTrack
                 println!(
                     "closed long, entry: ${:.2}, exit: ${:.2}, pnl: ${:.4}, total pnl: ${:.4}, trades = {}",
                     pos.entry_price, intent.price, pnl, tracker.total_pnl_usd, tracker.trade_count
+                );
+                log_trade(
+                    "long",
+                    pos.entry_price,
+                    intent.price,
+                    pnl,
+                    tracker.total_pnl_usd,
+                    tracker.trade_count,
                 )
             }
             (Some(pos), Signal::StrongBuy) if pos.side == PositionSide::Short => {
@@ -222,6 +263,14 @@ async fn executor(mut rx: mpsc::Receiver<TradeIntent>, state: Arc<Mutex<PnlTrack
                 println!(
                     "closed short, entry: ${:.2}, exit = ${:.2}, pnl: ${:.4}, total pnl: ${:.4}, trades = {}",
                     pos.entry_price, intent.price, pnl, tracker.total_pnl_usd, tracker.trade_count
+                );
+                log_trade(
+                    "short",
+                    pos.entry_price,
+                    intent.price,
+                    pnl,
+                    tracker.total_pnl_usd,
+                    tracker.trade_count,
                 )
             }
             _ => {}
@@ -231,6 +280,7 @@ async fn executor(mut rx: mpsc::Receiver<TradeIntent>, state: Arc<Mutex<PnlTrack
 
 const TRADE_SIZE_BTC: f64 = 0.001;
 const STARTING_CAPITAL_USD: f64 = 100.0;
+const SESSION_DURATION_SECS: u64 = 1800;
 
 #[tokio::main]
 async fn main() {
@@ -272,6 +322,12 @@ async fn main() {
                 let tracker = pnl_tracker.lock().await;
                 let pct_return = (tracker.total_pnl_usd / STARTING_CAPITAL_USD) * 100.0;
                 println!("-\nshutting down, trades: {}, pnl: ${:.4}, return: {:.4}%", tracker.trade_count, tracker.total_pnl_usd, pct_return);
+                break;
+            }
+            _ = tokio::time::sleep(Duration::from_secs(SESSION_DURATION_SECS)) => {
+                let tracker = pnl_tracker.lock().await;
+                let pct_return = (tracker.total_pnl_usd / STARTING_CAPITAL_USD) * 100.0;
+                println!("-\nauto shutdown, trades : {}, pnl: ${:.4}, return: {:.4}%", tracker.trade_count, tracker.total_pnl_usd, pct_return);
                 break;
             }
             msg = rx.recv() => {
