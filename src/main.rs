@@ -210,7 +210,7 @@ async fn executor(mut rx: mpsc::Receiver<TradeIntent>, state: Arc<Mutex<PnlTrack
                 tracker.trade_count += 1;
                 tracker.position = None;
                 println!(
-                    "closed long, entry: {:.2}, exit: {:.2}, pnl: {:.2}, total pnl: {:.2}, trades = {}",
+                    "closed long, entry: ${:.2}, exit: ${:.2}, pnl: ${:.4}, total pnl: ${:.4}, trades = {}",
                     pos.entry_price, intent.price, pnl, tracker.total_pnl_usd, tracker.trade_count
                 )
             }
@@ -220,7 +220,7 @@ async fn executor(mut rx: mpsc::Receiver<TradeIntent>, state: Arc<Mutex<PnlTrack
                 tracker.trade_count += 1;
                 tracker.position = None;
                 println!(
-                    "closed short, entry: {:.2}, exit = {:.2}, pnl: {:.2}, total pnl: {:.2}, trades = {}",
+                    "closed short, entry: ${:.2}, exit = ${:.2}, pnl: ${:.4}, total pnl: ${:.4}, trades = {}",
                     pos.entry_price, intent.price, pnl, tracker.total_pnl_usd, tracker.trade_count
                 )
             }
@@ -234,7 +234,7 @@ const STARTING_CAPITAL_USD: f64 = 100.0;
 
 #[tokio::main]
 async fn main() {
-    let request = "wss://stream.binance.com:9443/ws/btcusdt@depth10"
+    let request = "wss://stream.binance.com:9443/ws/btcusdt@depth10@100ms"
         .into_client_request()
         .expect("failed to parse");
 
@@ -271,7 +271,7 @@ async fn main() {
             _ = signal::ctrl_c() => {
                 let tracker = pnl_tracker.lock().await;
                 let pct_return = (tracker.total_pnl_usd / STARTING_CAPITAL_USD) * 100.0;
-                println!("-\nshutting down, trades: {}, pnl: ${:.2}, return: {:.2}%", tracker.trade_count, tracker.total_pnl_usd, pct_return);
+                println!("-\nshutting down, trades: {}, pnl: ${:.4}, return: {:.4}%", tracker.trade_count, tracker.total_pnl_usd, pct_return);
                 break;
             }
             msg = rx.recv() => {
