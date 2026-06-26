@@ -13,6 +13,15 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
+const TRADE_SIZE_BTC: f64 = 0.001;
+const STARTING_CAPITAL_USD: f64 = 100.0;
+const SESSION_DURATION_SECS: u64 = 3600;
+const OBI_STRONG_BUY: f64 = 0.7;
+const OBI_BUY: f64 = 0.6;
+const OBI_SELL: f64 = 0.4;
+const OBI_STRONG_SELL: f64 = 0.3;
+const OBI_SHIFT_THRESHOLD: f64 = 0.05;
+
 #[derive(Debug, Deserialize)]
 struct Quotes {
     #[serde(deserialize_with = "deserialize_price_qty")]
@@ -49,13 +58,13 @@ enum Signal {
 impl Signal {
     fn from_obi(obi: f64, prev_obi: f64) -> Self {
         let shift = obi - prev_obi;
-        if obi > 0.7 && shift > 0.05 {
+        if obi > OBI_STRONG_BUY && shift > OBI_SHIFT_THRESHOLD {
             Signal::StrongBuy
-        } else if obi > 0.6 {
+        } else if obi > OBI_BUY {
             Signal::Buy
-        } else if obi < 0.3 && shift < -0.05 {
+        } else if obi < OBI_STRONG_SELL && shift < -OBI_SHIFT_THRESHOLD {
             Signal::StrongSell
-        } else if obi < 0.4 {
+        } else if obi < OBI_SELL {
             Signal::Sell
         } else {
             Signal::Neutral
@@ -76,25 +85,27 @@ impl fmt::Display for Signal {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum PositionSide {
     Long,
     Short,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct Position {
     side: PositionSide,
     entry_price: f64,
 }
 
-#[derive(Default)]
+#[derive(Debug)]
 struct PnlTracker {
+    session_id: u32,
     total_pnl_usd: f64,
     trade_count: u32,
     position: Option<Position>,
 }
 
+#[derive(Debug)]
 struct TradeIntent {
     signal: Signal,
     price: f64,
@@ -183,6 +194,7 @@ impl fmt::Display for OrderBook {
 }
 
 fn log_trade(
+    session_id: u32,
     side: &str,
     entry_price: f64,
     exit_price: f64,
@@ -199,16 +211,36 @@ fn log_trade(
     if file.metadata().unwrap().len() == 0 {
         writeln!(
             file,
-            "timestamp,side,entry_price,exit_price,pnl,total_pnl,trade_count"
+            "timestamp,session_id,side,entry_price,exit_price,pnl,total_pnl,trade_count"
         )
         .unwrap();
     }
     writeln!(
         file,
-        "{},{},{:.2},{:.2},{:.4},{:.4},{}",
-        timestamp, side, entry_price, exit_price, pnl, total_pnl, trade_count
+        "{},{},{},{:.2},{:.2},{:.4},{:.4},{}",
+        timestamp, session_id, side, entry_price, exit_price, pnl, total_pnl, trade_count
     )
     .unwrap()
+}
+
+fn next_session_id() -> u32 {
+    let file = std::fs::File::open("trades.csv");
+    match file {
+        Err(_) => 1,
+        Ok(f) => {
+            let reader = std::io::BufReader::new(f);
+            let mut max_id = 0u32;
+            for line in std::io::BufRead::lines(reader).skip(1).flatten() {
+                let parts: Vec<&str> = line.split(',').collect();
+                if let Some(id_str) = parts.get(1)
+                    && let Ok(id) = id_str.parse::<u32>()
+                {
+                    max_id = max_id.max(id);
+                }
+            }
+            max_id + 1
+        }
+    }
 }
 
 async fn executor(mut rx: mpsc::Receiver<TradeIntent>, state: Arc<Mutex<PnlTracker>>) {
@@ -247,6 +279,7 @@ async fn executor(mut rx: mpsc::Receiver<TradeIntent>, state: Arc<Mutex<PnlTrack
                     pos.entry_price, intent.price, pnl, tracker.total_pnl_usd, tracker.trade_count
                 );
                 log_trade(
+                    tracker.session_id,
                     "long",
                     pos.entry_price,
                     intent.price,
@@ -265,6 +298,7 @@ async fn executor(mut rx: mpsc::Receiver<TradeIntent>, state: Arc<Mutex<PnlTrack
                     pos.entry_price, intent.price, pnl, tracker.total_pnl_usd, tracker.trade_count
                 );
                 log_trade(
+                    tracker.session_id,
                     "short",
                     pos.entry_price,
                     intent.price,
@@ -278,10 +312,6 @@ async fn executor(mut rx: mpsc::Receiver<TradeIntent>, state: Arc<Mutex<PnlTrack
     }
 }
 
-const TRADE_SIZE_BTC: f64 = 0.001;
-const STARTING_CAPITAL_USD: f64 = 100.0;
-const SESSION_DURATION_SECS: u64 = 1800;
-
 #[tokio::main]
 async fn main() {
     let request = "wss://stream.binance.com:9443/ws/btcusdt@depth10@100ms"
@@ -291,7 +321,12 @@ async fn main() {
     let (mut ws_stream, _) = connect_async(request).await.expect("failed to connect");
 
     let (tx, mut rx) = mpsc::channel::<String>(32);
-    let pnl_tracker = Arc::new(Mutex::new(PnlTracker::default()));
+    let pnl_tracker = Arc::new(Mutex::new(PnlTracker {
+        session_id: next_session_id(),
+        total_pnl_usd: 0.0,
+        trade_count: 0,
+        position: None,
+    }));
     let pnl_tracker_clone = Arc::clone(&pnl_tracker);
     let (trade_tx, trade_rx) = mpsc::channel::<TradeIntent>(32);
 
