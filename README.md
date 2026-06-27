@@ -17,7 +17,7 @@ close on opposite signal
 win rate: \~89%  
 ev per trade: \~$0.012  
 binomial p-value: < 1e-60  
-sharpe ratio: \~0.80
+sharpe ratio: \~0.6
 
 ## limitations
 
