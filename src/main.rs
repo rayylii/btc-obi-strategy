@@ -16,10 +16,8 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 const TRADE_SIZE_BTC: f64 = 0.001;
 const STARTING_CAPITAL_USD: f64 = 100.0;
 const SESSION_DURATION_SECS: u64 = 3600;
-const OBI_STRONG_BUY: f64 = 0.7;
-const OBI_BUY: f64 = 0.6;
-const OBI_SELL: f64 = 0.4;
-const OBI_STRONG_SELL: f64 = 0.3;
+const OBI_LONG: f64 = 0.7;
+const OBI_SHORT: f64 = 0.3;
 const OBI_SHIFT_THRESHOLD: f64 = 0.05;
 
 #[derive(Debug, Deserialize)]
@@ -48,24 +46,18 @@ where
 
 #[derive(Debug)]
 enum Signal {
-    StrongBuy,
-    Buy,
+    Long,
     Neutral,
-    Sell,
-    StrongSell,
+    Short,
 }
 
 impl Signal {
     fn from_obi(obi: f64, prev_obi: f64) -> Self {
         let shift = obi - prev_obi;
-        if obi > OBI_STRONG_BUY && shift > OBI_SHIFT_THRESHOLD {
-            Signal::StrongBuy
-        } else if obi > OBI_BUY {
-            Signal::Buy
-        } else if obi < OBI_STRONG_SELL && shift < -OBI_SHIFT_THRESHOLD {
-            Signal::StrongSell
-        } else if obi < OBI_SELL {
-            Signal::Sell
+        if obi > OBI_LONG && shift > OBI_SHIFT_THRESHOLD {
+            Signal::Long
+        } else if obi < OBI_SHORT && shift < -OBI_SHIFT_THRESHOLD {
+            Signal::Short
         } else {
             Signal::Neutral
         }
@@ -75,11 +67,9 @@ impl Signal {
 impl fmt::Display for Signal {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         let s = match self {
-            Signal::StrongBuy => "strong buy",
-            Signal::Buy => "buy",
+            Signal::Long => "long",
             Signal::Neutral => "neutral",
-            Signal::Sell => "sell",
-            Signal::StrongSell => "strong sell",
+            Signal::Short => "short",
         };
         write!(f, "{}", s)
     }
@@ -116,7 +106,7 @@ struct OrderBook {
     bids: Vec<(f64, f64)>,
     asks: Vec<(f64, f64)>,
     spread: Option<f64>,
-    obi: Option<f64>, // order book imbalance
+    obi: Option<f64>,
     prev_obi: Option<f64>,
 }
 
@@ -171,12 +161,10 @@ impl fmt::Display for OrderBook {
             Some(s) => format!("{:.2}", s),
             None => "unavailable".to_string(),
         };
-
         let obi_str = match self.obi {
             Some(o) => format!("{:.4}", o),
             None => "unavailable".to_string(),
         };
-
         let signal_str = match self.signal() {
             Some(s) => s.to_string(),
             None => "unavailable".to_string(),
@@ -249,7 +237,7 @@ async fn executor(mut rx: mpsc::Receiver<TradeIntent>, state: Arc<Mutex<PnlTrack
 
         let current_position = tracker.position;
         match (current_position, &intent.signal) {
-            (None, Signal::StrongBuy) => {
+            (None, Signal::Long) => {
                 println!(
                     "side: long, price: ${:.2}, size: {} BTC",
                     intent.price, TRADE_SIZE_BTC
@@ -259,7 +247,7 @@ async fn executor(mut rx: mpsc::Receiver<TradeIntent>, state: Arc<Mutex<PnlTrack
                     entry_price: intent.price,
                 })
             }
-            (None, Signal::StrongSell) => {
+            (None, Signal::Short) => {
                 println!(
                     "side: short, price: ${:.2}, size: {} BTC",
                     intent.price, TRADE_SIZE_BTC
@@ -269,7 +257,7 @@ async fn executor(mut rx: mpsc::Receiver<TradeIntent>, state: Arc<Mutex<PnlTrack
                     entry_price: intent.price,
                 })
             }
-            (Some(pos), Signal::StrongSell) if pos.side == PositionSide::Long => {
+            (Some(pos), Signal::Short) if pos.side == PositionSide::Long => {
                 let pnl = (intent.price - pos.entry_price) * TRADE_SIZE_BTC;
                 tracker.total_pnl_usd += pnl;
                 tracker.trade_count += 1;
@@ -288,7 +276,7 @@ async fn executor(mut rx: mpsc::Receiver<TradeIntent>, state: Arc<Mutex<PnlTrack
                     tracker.trade_count,
                 )
             }
-            (Some(pos), Signal::StrongBuy) if pos.side == PositionSide::Short => {
+            (Some(pos), Signal::Long) if pos.side == PositionSide::Short => {
                 let pnl = (pos.entry_price - intent.price) * TRADE_SIZE_BTC;
                 tracker.total_pnl_usd += pnl;
                 tracker.trade_count += 1;
@@ -374,18 +362,18 @@ async fn main() {
                             order_book.update(quotes);
                             print!("{}", order_book);
                             match order_book.signal() {
-                                Some(Signal::StrongBuy) => {
+                                Some(Signal::Long) => {
                                     if let Some(price) = order_book.best_ask() {
                                         let _ = trade_tx.send(TradeIntent {
-                                            signal: Signal::StrongBuy,
+                                            signal: Signal::Long,
                                             price,
                                         }).await;
                                     }
                                 }
-                                Some(Signal::StrongSell) =>  {
+                                Some(Signal::Short) => {
                                     if let Some(price) = order_book.best_bid() {
                                         let _ = trade_tx.send(TradeIntent {
-                                            signal: Signal::StrongSell,
+                                            signal: Signal::Short,
                                             price,
                                         }).await;
                                     }
