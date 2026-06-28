@@ -29,8 +29,19 @@ rust, python
 
 ## run
 
+install rust: https://rustup.rs
+
 ```bash
+git clone https://github.com/rayylii/btc-obi-strategy.git
+cd btc-obi-strategy
+pip install pandas matplotlib scipy jupyter
 cargo run
+```
+
+to analyse results:
+
+```bash
+jupyter notebook analysis.ipynb
 ```
 
 session duration and signal thresholds are configurable via constants at the top of `src/main.rs`. run `analysis.ipynb` to analyse results. use `analyse(df, session_id)` to analyse any session.
